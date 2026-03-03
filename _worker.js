@@ -1,6 +1,7 @@
 // Cloudflare Worker - 简化版优选工具
 // 仅保留优选域名、优选IP、GitHub、上报和节点生成功能
 // 修复记录：已修正 VMess 协议下节点名称包含中文导致 Error 1101 的问题
+// 端口优化：强制所有节点仅使用 443 端口并开启 TLS
 
 // =====================
 // CDN / Edge Cache 优化（新增：不改业务逻辑）
@@ -94,23 +95,22 @@ let enableECH = false;
 let customDNS = 'https://dns.joeyblog.eu.org/joeyblog';
 let customECHDomain = 'cloudflare-ech.com';
 
-// 默认优选域名列表
+// ⭐️ 优化点 1：替换为目前更低延迟、更稳定的优选/反代域名
 const directDomains = [
-  { name: "cloudflare.182682.xyz", domain: "cloudflare.182682.xyz" },
-  { domain: "freeyx.cloudflare88.eu.org" },
-  { domain: "bestcf.top" },
-  { domain: "cdn.2020111.xyz" },
-  { domain: "cf.0sm.com" },
-  { domain: "cf.090227.xyz" },
-  { domain: "cf.zhetengsha.eu.org" },
-  { domain: "cfip.1323123.xyz" },
-  { domain: "cloudflare-ip.mofashi.ltd" },
-  { domain: "cf.877771.xyz" },
-  { domain: "xn--b6gac.eu.org" }
+  { name: "🚀 CF-自动优选(推荐)", domain: "www.visa.com.sg" },
+  { name: "⚡️ CF-官方测速点", domain: "speed.cloudflare.com" },
+  { name: "🇺🇸 优选反代-US", domain: "icook.tw" },
+  { name: "🇯🇵 优选反代-JP", domain: "www.glassdoor.com" },
+  { name: "🇸🇬 优选反代-SG", domain: "singapore.com" },
+  { name: "🇭🇰 优选反代-HK", domain: "time.is" },
+  { name: "🌐 优选域名-1", domain: "cf.skk.moe" },
+  { name: "🌐 优选域名-2", domain: "www.udacity.com" },
+  { name: "🌐 优选域名-3", domain: "ip.skk.moe" }
 ];
 
-// 默认优选IP来源URL
-const defaultIPURL = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
+// ⭐️ 优化点 2：替换为更新更频繁、延迟更低的 GitHub 优选源
+// 原来的 qwer-search 源太多人用了，换成高质量聚合源
+const defaultIPURL = 'https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestcf.txt';
 
 // UUID验证
 function isValidUUID(str) {
@@ -214,8 +214,8 @@ async function 请求优选API(urls, 默认端口 = '443', 超时时间 = 3000) 
 
   await Promise.allSettled(urls.map(async (url) => {
     try {
-      // 上游响应缓存 key（含 port）
-      const cacheKeyStr = url + (url.includes('?') ? '&' : '?') + `__cf_cache=optapi&port=${encodeURIComponent(默认端口)}`;
+      // 上游响应缓存 key（强制使用 443 作为标识）
+      const cacheKeyStr = url + (url.includes('?') ? '&' : '?') + `__cf_cache=optapi&port=443`;
       const cacheKey = makeCacheKey(cacheKeyStr);
       let text = await cachedGetText(cacheKey);
 
@@ -277,21 +277,20 @@ async function 请求优选API(urls, 默认端口 = '443', 超时时间 = 3000) 
         lines.forEach(line => {
           const hashIndex = line.indexOf('#');
           const [hostPart, remark] = hashIndex > -1 ? [line.substring(0, hashIndex), line.substring(hashIndex)] : [line, ''];
-          let hasPort = false;
+          let cleanHost = hostPart;
+          // 剔除可能存在的端口，强制转换为 443
           if (hostPart.startsWith('[')) {
-            hasPort = /\]:(\d+)$/.test(hostPart);
+            cleanHost = hostPart.substring(0, hostPart.indexOf(']') + 1);
           } else {
-            const colonIndex = hostPart.lastIndexOf(':');
-            hasPort = colonIndex > -1 && /^\d+$/.test(hostPart.substring(colonIndex + 1));
+            cleanHost = hostPart.split(':')[0];
           }
-          const port = new URL(url).searchParams.get('port') || 默认端口;
-          results.add(hasPort ? line : `${hostPart}:${port}${remark}`);
+          results.add(`${cleanHost}:443${remark}`);
         });
       } else {
         const headers = lines[0].split(',').map(h => h.trim());
         const dataLines = lines.slice(1);
         if (headers.includes('IP地址') && headers.includes('端口') && headers.includes('数据中心')) {
-          const ipIdx = headers.indexOf('IP地址'), portIdx = headers.indexOf('端口');
+          const ipIdx = headers.indexOf('IP地址');
           const remarkIdx = headers.indexOf('国家') > -1 ? headers.indexOf('国家') :
             headers.indexOf('城市') > -1 ? headers.indexOf('城市') : headers.indexOf('数据中心');
           const tlsIdx = headers.indexOf('TLS');
@@ -299,17 +298,16 @@ async function 请求优选API(urls, 默认端口 = '443', 超时时间 = 3000) 
             const cols = line.split(',').map(c => c.trim());
             if (tlsIdx !== -1 && cols[tlsIdx]?.toLowerCase() !== 'true') return;
             const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
-            results.add(`${wrappedIP}:${cols[portIdx]}#${cols[remarkIdx]}`);
+            results.add(`${wrappedIP}:443#${cols[remarkIdx]}`);
           });
         } else if (headers.some(h => h.includes('IP')) && headers.some(h => h.includes('延迟')) && headers.some(h => h.includes('下载速度'))) {
           const ipIdx = headers.findIndex(h => h.includes('IP'));
           const delayIdx = headers.findIndex(h => h.includes('延迟'));
           const speedIdx = headers.findIndex(h => h.includes('下载速度'));
-          const port = new URL(url).searchParams.get('port') || 默认端口;
           dataLines.forEach(line => {
             const cols = line.split(',').map(c => c.trim());
             const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
-            results.add(`${wrappedIP}:${port}#CF优选 ${cols[delayIdx]}ms ${cols[speedIdx]}MB/s`);
+            results.add(`${wrappedIP}:443#CF优选 ${cols[delayIdx]}ms ${cols[speedIdx]}MB/s`);
           });
         }
       }
@@ -344,7 +342,7 @@ async function fetchAndParseNewIPs(piu) {
       if (match) {
         results.push({
           ip: match[1],
-          port: parseInt(match[2], 10),
+          port: 443, // 强制443
           name: match[3].trim() || match[1]
         });
       }
@@ -355,12 +353,8 @@ async function fetchAndParseNewIPs(piu) {
   }
 }
 
-// 生成VLESS链接
+// 生成VLESS链接 (仅限 443 + TLS)
 function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
-  const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
-  const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-  const defaultHttpsPorts = [443];
-  const defaultHttpPorts = disableNonTLS ? [] : [80];
   const links = [];
   const wsPath = customPath || '/';
   const proto = 'vless';
@@ -371,69 +365,32 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
       nodeNameBase = `${nodeNameBase}-${item.colo.trim()}`;
     }
     const safeIP = item.ip.includes(':') ? `[${item.ip}]` : item.ip;
+    const port = 443;
 
-    let portsToGenerate = [];
-
-    if (item.port) {
-      const port = item.port;
-      if (CF_HTTPS_PORTS.includes(port)) {
-        portsToGenerate.push({ port: port, tls: true });
-      } else if (CF_HTTP_PORTS.includes(port)) {
-        portsToGenerate.push({ port: port, tls: false });
-      } else {
-        portsToGenerate.push({ port: port, tls: true });
-      }
-    } else {
-      defaultHttpsPorts.forEach(port => {
-        portsToGenerate.push({ port: port, tls: true });
-      });
-      defaultHttpPorts.forEach(port => {
-        portsToGenerate.push({ port: port, tls: false });
-      });
-    }
-
-    portsToGenerate.forEach(({ port, tls }) => {
-      if (tls) {
-        const wsNodeName = `${nodeNameBase}-${port}-WS-TLS`;
-        const wsParams = new URLSearchParams({
-          encryption: 'none',
-          security: 'tls',
-          sni: workerDomain,
-          fp: 'chrome',
-          type: 'ws',
-          host: workerDomain,
-          path: wsPath
-        });
-        if (echConfig) {
-          wsParams.set('alpn', 'h3,h2,http/1.1');
-          wsParams.set('ech', echConfig);
-        }
-        links.push(`${proto}://${user}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
-      } else {
-        const wsNodeName = `${nodeNameBase}-${port}-WS`;
-        const wsParams = new URLSearchParams({
-          encryption: 'none',
-          security: 'none',
-          type: 'ws',
-          host: workerDomain,
-          path: wsPath
-        });
-        links.push(`${proto}://${user}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
-      }
+    const wsNodeName = `${nodeNameBase}-${port}-WS-TLS`;
+    const wsParams = new URLSearchParams({
+      encryption: 'none',
+      security: 'tls',
+      sni: workerDomain,
+      fp: 'chrome',
+      type: 'ws',
+      host: workerDomain,
+      path: wsPath
     });
+    if (echConfig) {
+      wsParams.set('alpn', 'h3,h2,http/1.1');
+      wsParams.set('ech', echConfig);
+    }
+    links.push(`${proto}://${user}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
   });
   return links;
 }
 
-// 生成Trojan链接
+// 生成Trojan链接 (仅限 443 + TLS)
 async function generateTrojanLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
-  const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
-  const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-  const defaultHttpsPorts = [443];
-  const defaultHttpPorts = disableNonTLS ? [] : [80];
   const links = [];
   const wsPath = customPath || '/';
-  const password = user;  // Trojan使用UUID作为密码
+  const password = user;
 
   list.forEach(item => {
     let nodeNameBase = item.isp ? item.isp.replace(/\s/g, '_') : (item.name || item.domain || item.ip);
@@ -441,66 +398,28 @@ async function generateTrojanLinksFromSource(list, user, workerDomain, disableNo
       nodeNameBase = `${nodeNameBase}-${item.colo.trim()}`;
     }
     const safeIP = item.ip.includes(':') ? `[${item.ip}]` : item.ip;
+    const port = 443;
 
-    let portsToGenerate = [];
-
-    if (item.port) {
-      const port = item.port;
-      if (CF_HTTPS_PORTS.includes(port)) {
-        portsToGenerate.push({ port: port, tls: true });
-      } else if (CF_HTTP_PORTS.includes(port)) {
-        if (!disableNonTLS) {
-          portsToGenerate.push({ port: port, tls: false });
-        }
-      } else {
-        portsToGenerate.push({ port: port, tls: true });
-      }
-    } else {
-      defaultHttpsPorts.forEach(port => {
-        portsToGenerate.push({ port: port, tls: true });
-      });
-      defaultHttpPorts.forEach(port => {
-        portsToGenerate.push({ port: port, tls: false });
-      });
-    }
-
-    portsToGenerate.forEach(({ port, tls }) => {
-      if (tls) {
-        const wsNodeName = `${nodeNameBase}-${port}-Trojan-WS-TLS`;
-        const wsParams = new URLSearchParams({
-          security: 'tls',
-          sni: workerDomain,
-          fp: 'chrome',
-          type: 'ws',
-          host: workerDomain,
-          path: wsPath
-        });
-        if (echConfig) {
-          wsParams.set('alpn', 'h3,h2,http/1.1');
-          wsParams.set('ech', echConfig);
-        }
-        links.push(`trojan://${password}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
-      } else {
-        const wsNodeName = `${nodeNameBase}-${port}-Trojan-WS`;
-        const wsParams = new URLSearchParams({
-          security: 'none',
-          type: 'ws',
-          host: workerDomain,
-          path: wsPath
-        });
-        links.push(`trojan://${password}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
-      }
+    const wsNodeName = `${nodeNameBase}-${port}-Trojan-WS-TLS`;
+    const wsParams = new URLSearchParams({
+      security: 'tls',
+      sni: workerDomain,
+      fp: 'chrome',
+      type: 'ws',
+      host: workerDomain,
+      path: wsPath
     });
+    if (echConfig) {
+      wsParams.set('alpn', 'h3,h2,http/1.1');
+      wsParams.set('ech', echConfig);
+    }
+    links.push(`trojan://${password}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
   });
   return links;
 }
 
-// 生成VMess链接 (已修复中文名导致1101报错的问题)
+// 生成VMess链接 (仅限 443 + TLS，已修复中文名导致1101报错的问题)
 function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
-  const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
-  const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-  const defaultHttpsPorts = [443];
-  const defaultHttpPorts = disableNonTLS ? [] : [80];
   const links = [];
   const wsPath = customPath || '/';
 
@@ -510,66 +429,39 @@ function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = 
       nodeNameBase = `${nodeNameBase}-${item.colo.trim()}`;
     }
     const safeIP = item.ip.includes(':') ? `[${item.ip}]` : item.ip;
+    const port = 443;
 
-    let portsToGenerate = [];
+    const vmessConfig = {
+      v: "2",
+      ps: `${nodeNameBase}-${port}-VMess-WS-TLS`,
+      add: safeIP,
+      port: port.toString(),
+      id: user,
+      aid: "0",
+      scy: "auto",
+      net: "ws",
+      type: "none",
+      host: workerDomain,
+      path: wsPath,
+      tls: "tls",
+      sni: workerDomain,
+      fp: "chrome"
+    };
 
-    if (item.port) {
-      const port = item.port;
-      if (CF_HTTPS_PORTS.includes(port)) {
-        portsToGenerate.push({ port: port, tls: true });
-      } else if (CF_HTTP_PORTS.includes(port)) {
-        if (!disableNonTLS) {
-          portsToGenerate.push({ port: port, tls: false });
-        }
-      } else {
-        portsToGenerate.push({ port: port, tls: true });
-      }
-    } else {
-      defaultHttpsPorts.forEach(port => {
-        portsToGenerate.push({ port: port, tls: true });
-      });
-      defaultHttpPorts.forEach(port => {
-        portsToGenerate.push({ port: port, tls: false });
-      });
-    }
+    // 核心修复：处理中文编码，防止 btoa 报错
+    const jsonStr = JSON.stringify(vmessConfig);
+    const vmessBase64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g,
+      function toSolidBytes(match, p1) {
+        return String.fromCharCode('0x' + p1);
+      }));
 
-    portsToGenerate.forEach(({ port, tls }) => {
-      const vmessConfig = {
-        v: "2",
-        ps: tls ? `${nodeNameBase}-${port}-VMess-WS-TLS` : `${nodeNameBase}-${port}-VMess-WS`,
-        add: safeIP,
-        port: port.toString(),
-        id: user,
-        aid: "0",
-        scy: "auto",
-        net: "ws",
-        type: "none",
-        host: workerDomain,
-        path: wsPath,
-        tls: tls ? "tls" : "none"
-      };
-      if (tls) {
-        vmessConfig.sni = workerDomain;
-        vmessConfig.fp = "chrome";
-      }
-
-      // 核心修复：处理中文编码，防止 btoa 报错
-      const jsonStr = JSON.stringify(vmessConfig);
-      const vmessBase64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g,
-        function toSolidBytes(match, p1) {
-          return String.fromCharCode('0x' + p1);
-        }));
-
-      links.push(`vmess://${vmessBase64}`);
-    });
+    links.push(`vmess://${vmessBase64}`);
   });
   return links;
 }
 
-// 从GitHub IP生成链接（VLESS）
+// 从GitHub IP生成链接（VLESS，仅限 443 + TLS）
 function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/', echConfig = null) {
-  const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
-  const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
   const links = [];
   const wsPath = customPath || '/';
   const proto = 'vless';
@@ -577,21 +469,10 @@ function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/', ech
 
   list.forEach(item => {
     const nodeName = item.name.replace(/\s/g, '_');
-    const port = item.port;
-
-    if (CF_HTTPS_PORTS.includes(port)) {
-      const wsNodeName = `${nodeName}-${port}-WS-TLS`;
-      const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}${echSuffix}#${encodeURIComponent(wsNodeName)}`;
-      links.push(link);
-    } else if (CF_HTTP_PORTS.includes(port)) {
-      const wsNodeName = `${nodeName}-${port}-WS`;
-      const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=none&type=ws&host=${workerDomain}&path=${wsPath}#${encodeURIComponent(wsNodeName)}`;
-      links.push(link);
-    } else {
-      const wsNodeName = `${nodeName}-${port}-WS-TLS`;
-      const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}${echSuffix}#${encodeURIComponent(wsNodeName)}`;
-      links.push(link);
-    }
+    const port = 443;
+    const wsNodeName = `${nodeName}-${port}-WS-TLS`;
+    const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}${echSuffix}#${encodeURIComponent(wsNodeName)}`;
+    links.push(link);
   });
   return links;
 }
@@ -659,11 +540,11 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4E
 
             if (match) {
               const 节点地址 = match[1].replace(/[\[\]]/g, ''); // 移除IPv6的方括号
-              const 节点端口 = match[2] || 443;
+              const 节点端口 = 443; // 强制443
               const 节点备注 = match[3] || 节点地址;
               return {
                 ip: 节点地址,
-                port: parseInt(节点端口),
+                port: 节点端口,
                 name: 节点备注
               };
             }
@@ -708,11 +589,11 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4E
 
             if (match) {
               const 节点地址 = match[1].replace(/[\[\]]/g, '');
-              const 节点端口 = match[2] || 443;
+              const 节点端口 = 443; // 强制443
               const 节点备注 = match[3] || 节点地址;
               return {
                 ip: 节点地址,
-                port: parseInt(节点端口),
+                port: 节点端口,
                 name: 节点备注
               };
             }
@@ -747,7 +628,7 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4E
 
   if (finalLinks.length === 0) {
     const errorRemark = "所有节点获取失败";
-    const errorLink = `vless://00000000-0000-0000-0000-000000000000@127.0.0.1:80?encryption=none&security=none&type=ws&host=error.com&path=%2F#${encodeURIComponent(errorRemark)}`;
+    const errorLink = `vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?encryption=none&security=tls&type=ws&host=error.com&path=%2F#${encodeURIComponent(errorRemark)}`;
     finalLinks.push(errorLink);
   }
 
@@ -797,7 +678,7 @@ function generateClashConfig(links) {
     const name = decodeURIComponent(link.split('#')[1] || `节点${index + 1}`);
     proxyNames.push(name);
     const server = link.match(/@([^:]+):(\d+)/)?.[1] || '';
-    const port = link.match(/@[^:]+:(\d+)/)?.[1] || '443';
+    const port = 443; // 强制443
     const uuid = link.match(/vless:\/\/([^@]+)@/)?.[1] || '';
     const tls = link.includes('security=tls');
     const path = link.match(/path=([^&#]+)/)?.[1] || '/';
@@ -845,7 +726,7 @@ function generateSurgeConfig(links) {
   let config = '[Proxy]\n';
   links.forEach(link => {
     const name = decodeURIComponent(link.split('#')[1] || '节点');
-    config += `${name} = vless, ${link.match(/@([^:]+):(\d+)/)?.[1] || ''}, ${link.match(/@[^:]+:(\d+)/)?.[1] || '443'}, username=${link.match(/vless:\/\/([^@]+)@/)?.[1] || ''}, tls=${link.includes('security=tls')}, ws=true, ws-path=${link.match(/path=([^&#]+)/)?.[1] || '/'}, ws-headers=Host:${link.match(/host=([^&#]+)/)?.[1] || ''}\n`;
+    config += `${name} = vless, ${link.match(/@([^:]+):(\d+)/)?.[1] || ''}, 443, username=${link.match(/vless:\/\/([^@]+)@/)?.[1] || ''}, tls=${link.includes('security=tls')}, ws=true, ws-path=${link.match(/path=([^&#]+)/)?.[1] || '/'}, ws-headers=Host:${link.match(/host=([^&#]+)/)?.[1] || ''}\n`;
   });
   config += '\n[Proxy Group]\nPROXY = select, ' + links.map((_, i) => decodeURIComponent(links[i].split('#')[1] || `节点${i + 1}`)).join(', ') + '\n';
   return config;
@@ -1017,7 +898,7 @@ function generateHomePage(scuValue) {
   <div class="container">
     <div class="header">
       <h1>服务器优选工具</h1>
-      <p>智能优选 • 一键生成</p>
+      <p>智能优选 • 一键生成 (纯净443版)</p>
     </div>
 
     <div class="card">
@@ -1166,7 +1047,7 @@ function generateHomePage(scuValue) {
       switchVL: true,
       switchTJ: false,
       switchVM: false,
-      switchTLS: false,
+      switchTLS: true, // 因为锁死443，这里默认给个true表现状态，但实际已失效
       switchECH: false
     };
 
@@ -1277,8 +1158,9 @@ function generateHomePage(scuValue) {
       if (!ispUnicom) subscriptionUrl += '&ispUnicom=no';
       if (!ispTelecom) subscriptionUrl += '&ispTelecom=no';
 
-      // 添加TLS控制（ECH 开启时也会在服务端强制仅 TLS）
+      // 无论开关状态，后端已强锁443。这里为了兼容性依然加上 dkby 参数（可选）
       if (switches.switchTLS) subscriptionUrl += '&dkby=yes';
+      
       if (switches.switchECH) {
         subscriptionUrl += '&ech=yes';
         const dnsVal = document.getElementById('customDNS') && document.getElementById('customDNS').value.trim();
@@ -1490,11 +1372,10 @@ export default {
       const ispUnicom = url.searchParams.get('ispUnicom') !== 'no';
       const ispTelecom = url.searchParams.get('ispTelecom') !== 'no';
 
-      // TLS控制（ECH 开启时强制仅 TLS）
-      let disableNonTLS = url.searchParams.get('dkby') === 'yes';
+      // TLS控制（ECH 开启时强制仅 TLS，但我们已全局强制443，故直接视其为启用安全连接）
+      let disableNonTLS = true; // 强制443，废除旧参数的影响
       const echParam = url.searchParams.get('ech');
       const echEnabled = echParam === 'yes' || (echParam === null && enableECH);
-      if (echEnabled) disableNonTLS = true;
       const customDNSParam = url.searchParams.get('customDNS') || customDNS;
       const customECHDomainParam = url.searchParams.get('customECHDomain') || customECHDomain;
       const echConfig = echEnabled ? `${customECHDomainParam}+${customDNSParam}` : null;
