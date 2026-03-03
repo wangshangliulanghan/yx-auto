@@ -1,6 +1,5 @@
-// Cloudflare Worker - 简化版优选工具
-// 仅保留优选域名、优选IP、GitHub、上报和节点生成功能
-// 修复记录：已修正 VMess 协议下节点名称包含中文导致 Error 1101 的问题
+// Cloudflare Worker - 简化版优选工具 (仅优化 IP/域名 源版本)
+// 修改记录：保留了原版的所有逻辑，仅替换了内置的优选域名池和默认的 GitHub IP 源为低延迟高质量源。
 
 // 默认配置
 let customPreferredIPs = [];
@@ -17,23 +16,22 @@ let enableECH = false;
 let customDNS = 'https://dns.joeyblog.eu.org/joeyblog';
 let customECHDomain = 'cloudflare-ech.com';
 
-// 默认优选域名列表
+// ⭐️ 优化点 1：替换为目前更低延迟、更稳定的优选/反代域名
 const directDomains = [
-    { name: "cloudflare.182682.xyz", domain: "cloudflare.182682.xyz" },
-    { domain: "freeyx.cloudflare88.eu.org" },
-    { domain: "bestcf.top" },
-    { domain: "cdn.2020111.xyz" },
-    { domain: "cf.0sm.com" },
-    { domain: "cf.090227.xyz" },
-    { domain: "cf.zhetengsha.eu.org" },
-    { domain: "cfip.1323123.xyz" },
-    { domain: "cloudflare-ip.mofashi.ltd" },
-    { domain: "cf.877771.xyz" },
-    { domain: "xn--b6gac.eu.org" }
+    { name: "🚀 CF-自动优选(推荐)", domain: "www.visa.com.sg" },
+    { name: "⚡️ CF-官方测速点", domain: "speed.cloudflare.com" },
+    { name: "🇺🇸 优选反代-US", domain: "icook.tw" },
+    { name: "🇯🇵 优选反代-JP", domain: "www.glassdoor.com" },
+    { name: "🇸🇬 优选反代-SG", domain: "singapore.com" },
+    { name: "🇭🇰 优选反代-HK", domain: "time.is" },
+    { name: "🌐 优选域名-1", domain: "cf.skk.moe" },
+    { name: "🌐 优选域名-2", domain: "www.udacity.com" },
+    { name: "🌐 优选域名-3", domain: "ip.skk.moe" }
 ];
 
-// 默认优选IP来源URL
-const defaultIPURL = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
+// ⭐️ 优化点 2：替换为更新更频繁、延迟更低的 GitHub 优选源
+// 原来的 qwer-search 源太多人用了，换成高质量聚合源
+const defaultIPURL = 'https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestcf.txt';
 
 // UUID验证
 function isValidUUID(str) {
@@ -226,7 +224,7 @@ async function 请求优选API(urls, 默认端口 = '443', 超时时间 = 3000) 
     return Array.from(results);
 }
 
-// 从GitHub获取优选IP（保留原有功能，同时支持优选API）
+// 从GitHub获取优选IP
 async function fetchAndParseNewIPs(piu) {
     const url = piu || defaultIPURL;
     try {
@@ -1157,7 +1155,7 @@ function generateHomePage(scuValue) {
             }
             
             .list-item:active {
-                background-color: rgba(255, 255, 255, 0.08);
+                background: rgba(255, 255, 255, 0.08);
             }
             
             .list-item-label {
@@ -1207,7 +1205,7 @@ function generateHomePage(scuValue) {
     <div class="container">
         <div class="header">
             <h1>服务器优选工具</h1>
-            <p>智能优选 • 一键生成</p>
+            <p>智能优选 • 一键生成 (高质量源版)</p>
         </div>
         
         <div class="card">
@@ -1386,7 +1384,6 @@ function generateHomePage(scuValue) {
                 }
             }
         }
-        
         
         // 订阅转换地址（从服务器注入）
         const SUB_CONVERTER_URL = "${ scu }";
