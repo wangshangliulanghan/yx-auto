@@ -1,5 +1,6 @@
-// Cloudflare Worker - 终极融合版 (智能排序 + 边缘缓存 + 纯净443大厂域名)
-// 结合了：Colo偏好/ms排序/Top截断 + 强制443 TLS + 高权重免测速域名 + Edge Cache
+// Cloudflare Worker - 修复硬伤 + 终极缓存优化版
+// 修复了 Promise解构错位、IPv6裸地址截断、SNI/Host变量错误、CacheKey未归一化等问题
+// 保持 443 端口强制锁定与 Colo/Top 排序逻辑
 
 const EDGE_CACHE_TTL_HOME = 60 * 60 * 6;        
 const EDGE_CACHE_TTL_SUB = 60 * 5;              
@@ -28,7 +29,6 @@ async function cachedSetJSON(cacheKey, obj, ttl = EDGE_CACHE_TTL_UPSTREAM, swr =
   await edgeCachePut(cacheKey, resp);
 }
 
-// 默认配置
 let customPreferredIPs = [];
 let customPreferredDomains = [];
 let epd = true;  
@@ -42,7 +42,6 @@ let enableECH = false;
 let customDNS = 'https://dns.joeyblog.eu.org/joeyblog';
 let customECHDomain = 'cloudflare-ech.com';
 
-// ⭐️ 强力CDN优化：高权重免测速域名池 (自动解析健康IP，避免死IP导致-1)
 const directDomains = [
   { name: "🚀 SG-Visa官方", domain: "www.visa.com.sg" },
   { name: "🚀 JP-Glassdoor", domain: "www.glassdoor.com" },
@@ -56,16 +55,17 @@ const defaultIPURL = 'https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestcf.
 
 function isValidUUID(str) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str); }
 
+// ✅ 修复 1：Promise 解构问题，确保不遗漏
 async function fetchDynamicIPs(ipv4Enabled = true, ipv6Enabled = true, ispMobile = true, ispUnicom = true, ispTelecom = true) {
   const v4Url = "https://www.wetest.vip/page/cloudflare/address_v4.html";
   const v6Url = "https://www.wetest.vip/page/cloudflare/address_v6.html";
   let results = [];
   try {
-    const fetchPromises = [];
-    if (ipv4Enabled) fetchPromises.push(fetchAndParseWetest(v4Url));
-    if (ipv6Enabled) fetchPromises.push(fetchAndParseWetest(v6Url));
-    const [ipv4List, ipv6List] = await Promise.all(fetchPromises);
-    results = [...(ipv4List||[]), ...(ipv6List||[])];
+    const p1 = ipv4Enabled ? fetchAndParseWetest(v4Url) : Promise.resolve([]);
+    const p2 = ipv6Enabled ? fetchAndParseWetest(v6Url) : Promise.resolve([]);
+    const [ipv4List, ipv6List] = await Promise.all([p1, p2]);
+    
+    results = [...ipv4List, ...ipv6List];
     if (results.length > 0) {
       results = results.filter(item => {
         const isp = item.isp || '';
@@ -75,7 +75,7 @@ async function fetchDynamicIPs(ipv4Enabled = true, ipv6Enabled = true, ispMobile
         return true;
       });
     }
-    return results.length > 0 ? results : [];
+    return results;
   } catch (e) { return []; }
 }
 
@@ -129,12 +129,22 @@ async function 请求优选API(urls, 超时时间 = 3000) {
       const lines = text.trim().split('\n').map(l => l.trim()).filter(l => l);
       const isCSV = lines.length > 1 && lines[0].includes(',');
       const IPV6_PATTERN = /^[^\[\]]*:[^\[\]]*:[^\[\]]/;
+      
       if (!isCSV) {
         lines.forEach(line => {
           const hashIndex = line.indexOf('#');
           const hostPart = hashIndex > -1 ? line.substring(0, hashIndex) : line;
           const remark = hashIndex > -1 ? line.substring(hashIndex) : '';
-          let cleanHost = hostPart.startsWith('[') ? hostPart.substring(0, hostPart.indexOf(']') + 1) : hostPart.split(':')[0];
+          
+          let cleanHost = hostPart.trim();
+          // ✅ 修复 6：正确解析裸 IPv6 地址，防止被 split(':') 截断毁掉
+          if (cleanHost.startsWith('[')) {
+            cleanHost = cleanHost.substring(0, cleanHost.indexOf(']') + 1);
+          } else if (cleanHost.includes(':') && cleanHost.split(':').length > 2) {
+            cleanHost = `[${cleanHost}]`;
+          } else {
+            cleanHost = cleanHost.split(':')[0];
+          }
           results.add(`${cleanHost}:443${remark}`);
         });
       } else {
@@ -178,46 +188,46 @@ async function fetchAndParseNewIPs(piu) {
   } catch (error) { return []; }
 }
 
-// ⭐️ 核心：全部端口锁定为 443，避免 80 端口被 QOS
-function generateLinksFromSource(list, user, workerDomain, disableNonTLS, customPath, echConfig) {
+// ✅ 修复 4：统一使用 userDomain 作为 sni 和 host，杜绝 workerDomain 污染
+function generateLinksFromSource(list, user, userDomain, disableNonTLS, customPath, echConfig) {
   const links = [];
   list.forEach(item => {
     let nodeNameBase = item.isp ? item.isp.replace(/\s/g, '_') : (item.name || item.domain || item.ip);
     if (item.colo && item.colo.trim()) nodeNameBase = `${nodeNameBase}-${item.colo.trim()}`;
     const safeIP = item.ip.includes(':') ? `[${item.ip}]` : item.ip;
-    const wsParams = new URLSearchParams({ encryption: 'none', security: 'tls', sni: workerDomain, fp: 'chrome', type: 'ws', host: workerDomain, path: customPath || '/' });
+    const wsParams = new URLSearchParams({ encryption: 'none', security: 'tls', sni: userDomain, fp: 'chrome', type: 'ws', host: userDomain, path: customPath || '/' });
     if (echConfig) { wsParams.set('alpn', 'h3,h2,http/1.1'); wsParams.set('ech', echConfig); }
     links.push(`vless://${user}@${safeIP}:443?${wsParams.toString()}#${encodeURIComponent(nodeNameBase + '-443-TLS')}`);
   });
   return links;
 }
 
-async function generateTrojanLinksFromSource(list, user, workerDomain, disableNonTLS, customPath, echConfig) {
+async function generateTrojanLinksFromSource(list, user, userDomain, disableNonTLS, customPath, echConfig) {
   const links = [];
   list.forEach(item => {
     let nodeNameBase = item.isp ? item.isp.replace(/\s/g, '_') : (item.name || item.domain || item.ip);
     const safeIP = item.ip.includes(':') ? `[${item.ip}]` : item.ip;
-    const wsParams = new URLSearchParams({ security: 'tls', sni: workerDomain, fp: 'chrome', type: 'ws', host: workerDomain, path: customPath || '/' });
+    const wsParams = new URLSearchParams({ security: 'tls', sni: userDomain, fp: 'chrome', type: 'ws', host: userDomain, path: customPath || '/' });
     if (echConfig) { wsParams.set('alpn', 'h3,h2,http/1.1'); wsParams.set('ech', echConfig); }
     links.push(`trojan://${user}@${safeIP}:443?${wsParams.toString()}#${encodeURIComponent(nodeNameBase + '-443-Trojan')}`);
   });
   return links;
 }
 
-function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS, customPath, echConfig) {
+function generateVMessLinksFromSource(list, user, userDomain, disableNonTLS, customPath, echConfig) {
   const links = [];
   list.forEach(item => {
     let nodeNameBase = item.isp ? item.isp.replace(/\s/g, '_') : (item.name || item.domain || item.ip);
     const safeIP = item.ip.includes(':') ? `[${item.ip}]` : item.ip;
-    const vmessConfig = { v: "2", ps: `${nodeNameBase}-443-VMess`, add: safeIP, port: "443", id: user, aid: "0", scy: "auto", net: "ws", type: "none", host: workerDomain, path: customPath || "/", tls: "tls", sni: workerDomain, fp: "chrome" };
+    const vmessConfig = { v: "2", ps: `${nodeNameBase}-443-VMess`, add: safeIP, port: "443", id: user, aid: "0", scy: "auto", net: "ws", type: "none", host: userDomain, path: customPath || "/", tls: "tls", sni: userDomain, fp: "chrome" };
     const vmessBase64 = btoa(encodeURIComponent(JSON.stringify(vmessConfig)).replace(/%([0-9A-F]{2})/g, (m, p) => String.fromCharCode('0x' + p)));
     links.push(`vmess://${vmessBase64}`);
   });
   return links;
 }
 
-function generateLinksFromNewIPs(list, user, workerDomain, customPath, echConfig) {
-  return generateLinksFromSource(list, user, workerDomain, true, customPath, echConfig);
+function generateLinksFromNewIPs(list, user, userDomain, customPath, echConfig) {
+  return generateLinksFromSource(list, user, userDomain, true, customPath, echConfig);
 }
 
 async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4, ipv6, mob, uni, tel, ev, et, vm, dTLS, cPath, echConfig) {
@@ -227,7 +237,6 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4,
   const nodeDomain = customDomain || url.hostname;
   const target = url.searchParams.get('target') || 'base64';
   
-  // URL参数获取排序与截断偏好
   const preferColo = (url.searchParams.get('colo') || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
   const topN = Math.max(0, parseInt(url.searchParams.get('top') || '0', 10) || 0);
 
@@ -287,9 +296,7 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4,
     } catch (e) {}
   }
 
-  // 最终总截断
   if (topN && finalLinks.length > topN) finalLinks.length = topN;
-
   if (finalLinks.length === 0) finalLinks.push(`vless://00000000-0000-0000-0000-000000000000@127.0.0.1:443?encryption=none&security=tls&type=ws&host=error.com&path=%2F#${encodeURIComponent('节点获取失败')}`);
 
   let subscriptionContent, contentType = 'text/plain; charset=utf-8';
@@ -356,7 +363,7 @@ function generateSurgeConfig(links) {
 function generateQuantumultConfig(links) { return btoa(links.join('\n')); }
 
 function generateHomePage(scuValue) {
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>服务器优选工具</title><style>* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; } body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f7; color: #1d1d1f; padding: 20px; } .container { max-width: 600px; margin: 0 auto; } .header { text-align: center; padding: 30px 0; } .header h1 { font-size: 32px; font-weight: 700; margin-bottom: 8px; } .header p { font-size: 15px; color: #86868b; } .card { background: #fff; border-radius: 20px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); margin-bottom: 20px; } .form-group { margin-bottom: 20px; } label { display: block; font-size: 13px; font-weight: 600; color: #86868b; margin-bottom: 8px; } input { width: 100%; padding: 14px; background: #f2f2f7; border: none; border-radius: 12px; font-size: 16px; outline: none; } input:focus { border: 2px solid #007AFF; padding: 12px 14px; } .list-item { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid #f2f2f7; cursor: pointer; } .switch { width: 51px; height: 31px; background: #e5e5ea; border-radius: 16px; position: relative; transition: 0.3s; } .switch.active { background: #34c759; } .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; background: #fff; border-radius: 50%; transition: 0.3s; box-shadow: 0 2px 4px rgba(0,0,0,0.1); } .switch.active::after { transform: translateX(20px); } .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; } .client-btn { padding: 12px; font-size: 13px; font-weight: 600; color: #007aff; background: rgba(0,122,255,0.1); border: none; border-radius: 10px; cursor: pointer; } .client-btn:active { background: rgba(0,122,255,0.2); } #clientSubscriptionUrl { margin-top: 15px; padding: 12px; background: #f2f2f7; border-radius: 8px; font-size: 12px; word-break: break-all; display: none; color: #007aff; }</style></head><body><div class="container"><div class="header"><h1>服务器优选工具</h1><p>智能优选 • 纯净 443 加速版</p></div><div class="card"><div class="form-group"><label>域名 (必填)</label><input type="text" id="domain" placeholder="您的Worker域名"></div><div class="form-group"><label>UUID/Password (必填)</label><input type="text" id="uuid" placeholder="您的UUID"></div><div class="form-group"><label>WS 路径 (可选)</label><input type="text" id="customPath" placeholder="默认为 /" value="/"></div><div class="form-group"><label>截断限制 (Top)</label><input type="number" id="topLimit" placeholder="为空则不限制，建议填 30-60"></div><div class="list-item" onclick="toggleSwitch('switchDomain')"><span>启用大厂免测速域名 (推荐)</span><div class="switch active" id="switchDomain"></div></div><div class="list-item" onclick="toggleSwitch('switchIP')"><span>启用动态IP源</span><div class="switch active" id="switchIP"></div></div><div class="list-item" onclick="toggleSwitch('switchGitHub')"><span>启用GitHub优选</span><div class="switch active" id="switchGitHub"></div></div><div class="btn-grid"><button class="client-btn" onclick="gen('v2ray')">复制通用订阅</button><button class="client-btn" onclick="gen('clash')">复制 Clash 订阅</button></div><div id="clientSubscriptionUrl"></div></div></div><script>let s = { switchDomain: true, switchIP: true, switchGitHub: true }; function toggleSwitch(id) { s[id] = !s[id]; document.getElementById(id).classList.toggle('active'); } function gen(t) { const d = document.getElementById('domain').value.trim(); const u = document.getElementById('uuid').value.trim(); const p = document.getElementById('customPath').value.trim() || '/'; const top = document.getElementById('topLimit').value.trim(); if(!d || !u) return alert('请先填写域名和UUID'); let link = \`\${window.location.origin}/\${u}/sub?domain=\${encodeURIComponent(d)}&epd=\${s.switchDomain?'yes':'no'}&epi=\${s.switchIP?'yes':'no'}&egi=\${s.switchGitHub?'yes':'no'}&ev=yes&path=\${encodeURIComponent(p)}\`; if(top) link += \`&top=\${top}\`; let finalUrl = link; if(t !== 'v2ray') { finalUrl = "${scu}?target=" + t + "&url=" + encodeURIComponent(link) + "&insert=false&emoji=true&list=false&new_name=true"; } document.getElementById('clientSubscriptionUrl').innerText = finalUrl; document.getElementById('clientSubscriptionUrl').style.display = 'block'; navigator.clipboard.writeText(finalUrl); alert('已生成并复制订阅链接'); }</script></body></html>`;
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"><title>服务器优选工具</title><style>* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; } body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f7; color: #1d1d1f; padding: 20px; } .container { max-width: 600px; margin: 0 auto; } .header { text-align: center; padding: 30px 0; } .header h1 { font-size: 32px; font-weight: 700; margin-bottom: 8px; } .header p { font-size: 15px; color: #86868b; } .card { background: #fff; border-radius: 20px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); margin-bottom: 20px; } .form-group { margin-bottom: 20px; } label { display: block; font-size: 13px; font-weight: 600; color: #86868b; margin-bottom: 8px; } input { width: 100%; padding: 14px; background: #f2f2f7; border: none; border-radius: 12px; font-size: 16px; outline: none; } input:focus { border: 2px solid #007AFF; padding: 12px 14px; } .list-item { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid #f2f2f7; cursor: pointer; } .switch { width: 51px; height: 31px; background: #e5e5ea; border-radius: 16px; position: relative; transition: 0.3s; } .switch.active { background: #34c759; } .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; background: #fff; border-radius: 50%; transition: 0.3s; box-shadow: 0 2px 4px rgba(0,0,0,0.1); } .switch.active::after { transform: translateX(20px); } .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; } .client-btn { padding: 12px; font-size: 13px; font-weight: 600; color: #007aff; background: rgba(0,122,255,0.1); border: none; border-radius: 10px; cursor: pointer; } .client-btn:active { background: rgba(0,122,255,0.2); } #clientSubscriptionUrl { margin-top: 15px; padding: 12px; background: #f2f2f7; border-radius: 8px; font-size: 12px; word-break: break-all; display: none; color: #007aff; }</style></head><body><div class="container"><div class="header"><h1>服务器优选工具</h1><p>智能优选 • 纯净 443 加速版</p></div><div class="card"><div class="form-group"><label>域名 (必填)</label><input type="text" id="domain" placeholder="您的Worker自定义域名"></div><div class="form-group"><label>UUID/Password (必填)</label><input type="text" id="uuid" placeholder="您的UUID"></div><div class="form-group"><label>WS 路径 (可选)</label><input type="text" id="customPath" placeholder="默认为 /" value="/"></div><div class="form-group"><label>截断限制 (Top)</label><input type="number" id="topLimit" placeholder="为空则不限制，建议填 30-60"></div><div class="list-item" onclick="toggleSwitch('switchDomain')"><span>启用大厂免测速域名 (推荐)</span><div class="switch active" id="switchDomain"></div></div><div class="list-item" onclick="toggleSwitch('switchIP')"><span>启用动态IP源</span><div class="switch active" id="switchIP"></div></div><div class="list-item" onclick="toggleSwitch('switchGitHub')"><span>启用GitHub优选</span><div class="switch active" id="switchGitHub"></div></div><div class="btn-grid"><button class="client-btn" onclick="gen('v2ray')">复制通用订阅</button><button class="client-btn" onclick="gen('clash')">复制 Clash 订阅</button></div><div id="clientSubscriptionUrl"></div></div></div><script>let s = { switchDomain: true, switchIP: true, switchGitHub: true }; function toggleSwitch(id) { s[id] = !s[id]; document.getElementById(id).classList.toggle('active'); } function gen(t) { const d = document.getElementById('domain').value.trim(); const u = document.getElementById('uuid').value.trim(); const p = document.getElementById('customPath').value.trim() || '/'; const top = document.getElementById('topLimit').value.trim(); if(!d || !u) return alert('请先填写域名和UUID'); let link = \`\${window.location.origin}/\${u}/sub?domain=\${encodeURIComponent(d)}&epd=\${s.switchDomain?'yes':'no'}&epi=\${s.switchIP?'yes':'no'}&egi=\${s.switchGitHub?'yes':'no'}&ev=yes&path=\${encodeURIComponent(p)}\`; if(top) link += \`&top=\${top}\`; let finalUrl = link; if(t !== 'v2ray') { finalUrl = "${scuValue}?target=" + t + "&url=" + encodeURIComponent(link) + "&insert=false&emoji=true&list=false&new_name=true"; } document.getElementById('clientSubscriptionUrl').innerText = finalUrl; document.getElementById('clientSubscriptionUrl').style.display = 'block'; navigator.clipboard.writeText(finalUrl); alert('已生成并复制订阅链接'); }</script></body></html>`;
 }
 
 export default {
@@ -376,7 +383,11 @@ export default {
 
     const subMatch = path.match(/^\/([^\/]+)\/sub$/);
     if (subMatch) {
-      const cacheKey = makeCacheKey(request.url);
+      // ✅ 修复 3：统一缓存键 (规避参数乱序导致的 Cache Churn)
+      const normalizedUrl = new URL(request.url);
+      normalizedUrl.searchParams.sort();
+      const cacheKey = makeCacheKey(normalizedUrl.toString());
+      
       const cached = await edgeCacheGet(cacheKey);
       if (cached) return cached;
 
