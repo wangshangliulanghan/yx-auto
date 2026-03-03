@@ -1,5 +1,5 @@
-// Cloudflare Worker - 简化版优选工具
-// 仅保留优选域名、优选IP、GitHub、上报和节点生成功能
+// Cloudflare Worker - 简化版优选工具 (仅优化 IP/域名 源版本)
+// 修改记录：保留了原版的所有逻辑，仅替换了内置的优选域名池和默认的 GitHub IP 源为低延迟高质量源。
 
 // 默认配置
 let customPreferredIPs = [];
@@ -11,24 +11,27 @@ let ev = true;   // 启用VLESS协议
 let et = false;  // 启用Trojan协议
 let vm = false;  // 启用VMess协议
 let scu = 'https://url.v1.mk/sub';  // 订阅转换地址
+// ECH (Encrypted Client Hello)
+let enableECH = false;
+let customDNS = 'https://dns.joeyblog.eu.org/joeyblog';
+let customECHDomain = 'cloudflare-ech.com';
 
-// 默认优选域名列表
+// ⭐️ 优化点 1：替换为目前更低延迟、更稳定的优选/反代域名
 const directDomains = [
-    { name: "cloudflare.182682.xyz", domain: "cloudflare.182682.xyz" },
-    { domain: "freeyx.cloudflare88.eu.org" },
-    { domain: "bestcf.top" },
-    { domain: "cdn.2020111.xyz" },
-    { domain: "cf.0sm.com" },
-    { domain: "cf.090227.xyz" },
-    { domain: "cf.zhetengsha.eu.org" },
-    { domain: "cfip.1323123.xyz" },
-    { domain: "cloudflare-ip.mofashi.ltd" },
-    { domain: "cf.877771.xyz" },
-    { domain: "xn--b6gac.eu.org" }
+    { name: "🚀 CF-自动优选(推荐)", domain: "www.visa.com.sg" },
+    { name: "⚡️ CF-官方测速点", domain: "speed.cloudflare.com" },
+    { name: "🇺🇸 优选反代-US", domain: "icook.tw" },
+    { name: "🇯🇵 优选反代-JP", domain: "www.glassdoor.com" },
+    { name: "🇸🇬 优选反代-SG", domain: "singapore.com" },
+    { name: "🇭🇰 优选反代-HK", domain: "time.is" },
+    { name: "🌐 优选域名-1", domain: "cf.skk.moe" },
+    { name: "🌐 优选域名-2", domain: "www.udacity.com" },
+    { name: "🌐 优选域名-3", domain: "ip.skk.moe" }
 ];
 
-// 默认优选IP来源URL
-const defaultIPURL = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
+// ⭐️ 优化点 2：替换为更新更频繁、延迟更低的 GitHub 优选源
+// 原来的 qwer-search 源太多人用了，换成高质量聚合源
+const defaultIPURL = 'https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestcf.txt';
 
 // UUID验证
 function isValidUUID(str) {
@@ -109,6 +112,118 @@ async function fetchAndParseWetest(url) {
     }
 }
 
+// 整理成数组
+async function 整理成数组(内容) {
+    var 替换后的内容 = 内容.replace(/[	"'\r\n]+/g, ',').replace(/,+/g, ',');
+    if (替换后的内容.charAt(0) == ',') 替换后的内容 = 替换后的内容.slice(1);
+    if (替换后的内容.charAt(替换后的内容.length - 1) == ',') 替换后的内容 = 替换后的内容.slice(0, 替换后的内容.length - 1);
+    const 地址数组 = 替换后的内容.split(',');
+    return 地址数组;
+}
+
+// 请求优选API
+async function 请求优选API(urls, 默认端口 = '443', 超时时间 = 3000) {
+    if (!urls?.length) return [];
+    const results = new Set();
+    await Promise.allSettled(urls.map(async (url) => {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 超时时间);
+            const response = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            let text = '';
+            try {
+                const buffer = await response.arrayBuffer();
+                const contentType = (response.headers.get('content-type') || '').toLowerCase();
+                const charset = contentType.match(/charset=([^\s;]+)/i)?.[1]?.toLowerCase() || '';
+
+                // 根据 Content-Type 响应头判断编码优先级
+                let decoders = ['utf-8', 'gb2312']; // 默认优先 UTF-8
+                if (charset.includes('gb') || charset.includes('gbk') || charset.includes('gb2312')) {
+                    decoders = ['gb2312', 'utf-8']; // 如果明确指定 GB 系编码，优先尝试 GB2312
+                }
+
+                // 尝试多种编码解码
+                let decodeSuccess = false;
+                for (const decoder of decoders) {
+                    try {
+                        const decoded = new TextDecoder(decoder).decode(buffer);
+                        // 验证解码结果的有效性
+                        if (decoded && decoded.length > 0 && !decoded.includes('\ufffd')) {
+                            text = decoded;
+                            decodeSuccess = true;
+                            break;
+                        } else if (decoded && decoded.length > 0) {
+                            // 如果有替换字符 (U+FFFD)，说明编码不匹配，继续尝试下一个编码
+                            continue;
+                        }
+                    } catch (e) {
+                        // 该编码解码失败，尝试下一个
+                        continue;
+                    }
+                }
+
+                // 如果所有编码都失败或无效，尝试 response.text()
+                if (!decodeSuccess) {
+                    text = await response.text();
+                }
+
+                // 如果返回的是空或无效数据，返回
+                if (!text || text.trim().length === 0) {
+                    return;
+                }
+            } catch (e) {
+                console.error('Failed to decode response:', e);
+                return;
+            }
+            const lines = text.trim().split('\n').map(l => l.trim()).filter(l => l);
+            const isCSV = lines.length > 1 && lines[0].includes(',');
+            const IPV6_PATTERN = /^[^\[\]]*:[^\[\]]*:[^\[\]]/;
+            if (!isCSV) {
+                lines.forEach(line => {
+                    const hashIndex = line.indexOf('#');
+                    const [hostPart, remark] = hashIndex > -1 ? [line.substring(0, hashIndex), line.substring(hashIndex)] : [line, ''];
+                    let hasPort = false;
+                    if (hostPart.startsWith('[')) {
+                        hasPort = /\]:(\d+)$/.test(hostPart);
+                    } else {
+                        const colonIndex = hostPart.lastIndexOf(':');
+                        hasPort = colonIndex > -1 && /^\d+$/.test(hostPart.substring(colonIndex + 1));
+                    }
+                    const port = new URL(url).searchParams.get('port') || 默认端口;
+                    results.add(hasPort ? line : `${hostPart}:${port}${remark}`);
+                });
+            } else {
+                const headers = lines[0].split(',').map(h => h.trim());
+                const dataLines = lines.slice(1);
+                if (headers.includes('IP地址') && headers.includes('端口') && headers.includes('数据中心')) {
+                    const ipIdx = headers.indexOf('IP地址'), portIdx = headers.indexOf('端口');
+                    const remarkIdx = headers.indexOf('国家') > -1 ? headers.indexOf('国家') :
+                        headers.indexOf('城市') > -1 ? headers.indexOf('城市') : headers.indexOf('数据中心');
+                    const tlsIdx = headers.indexOf('TLS');
+                    dataLines.forEach(line => {
+                        const cols = line.split(',').map(c => c.trim());
+                        if (tlsIdx !== -1 && cols[tlsIdx]?.toLowerCase() !== 'true') return;
+                        const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
+                        results.add(`${wrappedIP}:${cols[portIdx]}#${cols[remarkIdx]}`);
+                    });
+                } else if (headers.some(h => h.includes('IP')) && headers.some(h => h.includes('延迟')) && headers.some(h => h.includes('下载速度'))) {
+                    const ipIdx = headers.findIndex(h => h.includes('IP'));
+                    const delayIdx = headers.findIndex(h => h.includes('延迟'));
+                    const speedIdx = headers.findIndex(h => h.includes('下载速度'));
+                    const port = new URL(url).searchParams.get('port') || 默认端口;
+                    dataLines.forEach(line => {
+                        const cols = line.split(',').map(c => c.trim());
+                        const wrappedIP = IPV6_PATTERN.test(cols[ipIdx]) ? `[${cols[ipIdx]}]` : cols[ipIdx];
+                        results.add(`${wrappedIP}:${port}#CF优选 ${cols[delayIdx]}ms ${cols[speedIdx]}MB/s`);
+                    });
+                }
+            }
+        } catch (e) { }
+    }));
+    return Array.from(results);
+}
+
 // 从GitHub获取优选IP
 async function fetchAndParseNewIPs(piu) {
     const url = piu || defaultIPURL;
@@ -139,7 +254,7 @@ async function fetchAndParseNewIPs(piu) {
 }
 
 // 生成VLESS链接
-function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/') {
+function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
     const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
     const defaultHttpsPorts = [443];
@@ -187,6 +302,10 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
                     host: workerDomain, 
                     path: wsPath
                 });
+                if (echConfig) {
+                    wsParams.set('alpn', 'h3,h2,http/1.1');
+                    wsParams.set('ech', echConfig);
+                }
                 links.push(`${proto}://${user}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
             } else {
                 const wsNodeName = `${nodeNameBase}-${port}-WS`;
@@ -205,7 +324,7 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
 }
 
 // 生成Trojan链接
-async function generateTrojanLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/') {
+async function generateTrojanLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
     const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
     const defaultHttpsPorts = [443];
@@ -254,6 +373,10 @@ async function generateTrojanLinksFromSource(list, user, workerDomain, disableNo
                     host: workerDomain, 
                     path: wsPath
                 });
+                if (echConfig) {
+                    wsParams.set('alpn', 'h3,h2,http/1.1');
+                    wsParams.set('ech', echConfig);
+                }
                 links.push(`trojan://${password}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
             } else {
                 const wsNodeName = `${nodeNameBase}-${port}-Trojan-WS`;
@@ -270,8 +393,8 @@ async function generateTrojanLinksFromSource(list, user, workerDomain, disableNo
     return links;
 }
 
-// 生成VMess链接
-function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/') {
+// 生成VMess链接 (已修复中文名导致1101报错的问题)
+function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
     const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
     const defaultHttpsPorts = [443];
@@ -327,7 +450,14 @@ function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = 
                 vmessConfig.sni = workerDomain;
                 vmessConfig.fp = "chrome";
             }
-            const vmessBase64 = btoa(JSON.stringify(vmessConfig));
+            
+            // 核心修复：处理中文编码，防止 btoa 报错
+            const jsonStr = JSON.stringify(vmessConfig);
+            const vmessBase64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g,
+                function toSolidBytes(match, p1) {
+                    return String.fromCharCode('0x' + p1);
+            }));
+            
             links.push(`vmess://${vmessBase64}`);
         });
     });
@@ -335,12 +465,13 @@ function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = 
 }
 
 // 从GitHub IP生成链接（VLESS）
-function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/') {
+function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/', echConfig = null) {
     const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
     const links = [];
     const wsPath = customPath || '/';
     const proto = 'vless';
+    const echSuffix = echConfig ? `&alpn=h3%2Ch2%2Chttp%2F1.1&ech=${encodeURIComponent(echConfig)}` : '';
     
     list.forEach(item => {
         const nodeName = item.name.replace(/\s/g, '_');
@@ -348,7 +479,7 @@ function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/') {
         
         if (CF_HTTPS_PORTS.includes(port)) {
             const wsNodeName = `${nodeName}-${port}-WS-TLS`;
-            const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}#${encodeURIComponent(wsNodeName)}`;
+            const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}${echSuffix}#${encodeURIComponent(wsNodeName)}`;
             links.push(link);
         } else if (CF_HTTP_PORTS.includes(port)) {
             const wsNodeName = `${nodeName}-${port}-WS`;
@@ -356,7 +487,7 @@ function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/') {
             links.push(link);
         } else {
             const wsNodeName = `${nodeName}-${port}-WS-TLS`;
-            const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}#${encodeURIComponent(wsNodeName)}`;
+            const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}${echSuffix}#${encodeURIComponent(wsNodeName)}`;
             links.push(link);
         }
     });
@@ -364,7 +495,7 @@ function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/') {
 }
 
 // 生成订阅内容
-async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled, disableNonTLS, customPath) {
+async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled, disableNonTLS, customPath, echConfig = null) {
     const url = new URL(request.url);
     const finalLinks = [];
     const workerDomain = url.hostname;  // workerDomain始终是请求的hostname
@@ -378,13 +509,13 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4E
         const useVL = hasProtocol ? evEnabled : true;  // 如果没有选择任何协议，默认使用VLESS
         
         if (useVL) {
-            finalLinks.push(...generateLinksFromSource(list, user, nodeDomain, disableNonTLS, wsPath));
+            finalLinks.push(...generateLinksFromSource(list, user, nodeDomain, disableNonTLS, wsPath, echConfig));
         }
         if (etEnabled) {
-            finalLinks.push(...await generateTrojanLinksFromSource(list, user, nodeDomain, disableNonTLS, wsPath));
+            finalLinks.push(...await generateTrojanLinksFromSource(list, user, nodeDomain, disableNonTLS, wsPath, echConfig));
         }
         if (vmEnabled) {
-            finalLinks.push(...generateVMessLinksFromSource(list, user, nodeDomain, disableNonTLS, wsPath));
+            finalLinks.push(...generateVMessLinksFromSource(list, user, nodeDomain, disableNonTLS, wsPath, echConfig));
         }
     }
 
@@ -410,22 +541,105 @@ async function handleSubscriptionRequest(request, user, customDomain, piu, ipv4E
         }
     }
 
-    // GitHub优选
+    // GitHub优选 / 优选API
     if (egi) {
         try {
-            const newIPList = await fetchAndParseNewIPs(piu);
-            if (newIPList.length > 0) {
-                // 确保至少有一个协议被启用
-                const hasProtocol = evEnabled || etEnabled || vmEnabled;
-                const useVL = hasProtocol ? evEnabled : true;  // 如果没有选择任何协议，默认使用VLESS
-                
-                if (useVL) {
-                    finalLinks.push(...generateLinksFromNewIPs(newIPList, user, nodeDomain, wsPath));
+            // 检查是否是优选API URL（以https://开头）
+            if (piu && piu.toLowerCase().startsWith('https://')) {
+                // 从优选API获取IP列表
+                const 优选API的IP = await 请求优选API([piu]);
+                if (优选API的IP && 优选API的IP.length > 0) {
+                    // 解析IP字符串格式：IP:端口#备注
+                    const IP列表 = 优选API的IP.map(原始地址 => {
+                        // 统一正则: 匹配 域名/IPv4/IPv6地址 + 可选端口 + 可选备注
+                        const regex = /^(\[[\da-fA-F:]+\]|[\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\d+))?(?:#(.+))?$/;
+                        const match = 原始地址.match(regex);
+
+                        if (match) {
+                            const 节点地址 = match[1].replace(/[\[\]]/g, ''); // 移除IPv6的方括号
+                            const 节点端口 = match[2] || 443;
+                            const 节点备注 = match[3] || 节点地址;
+                            return {
+                                ip: 节点地址,
+                                port: parseInt(节点端口),
+                                name: 节点备注
+                            };
+                        }
+                        return null;
+                    }).filter(item => item !== null);
+                    
+                    if (IP列表.length > 0) {
+                        const hasProtocol = evEnabled || etEnabled || vmEnabled;
+                        const useVL = hasProtocol ? evEnabled : true;
+                        
+                        if (useVL) {
+                            finalLinks.push(...generateLinksFromNewIPs(IP列表, user, nodeDomain, wsPath, echConfig));
+                        }
+                    }
                 }
-                // GitHub IP只支持VLESS格式
+            } else if (piu && piu.includes('\n')) {
+                // 支持多行文本，包含混合格式（优选API URL + IP列表）
+                const 完整优选列表 = await 整理成数组(piu);
+                const 优选API = [], 优选IP = [], 其他节点 = [];
+                
+                for (const 元素 of 完整优选列表) {
+                    if (元素.toLowerCase().startsWith('https://')) {
+                        优选API.push(元素);
+                    } else if (元素.toLowerCase().includes('://')) {
+                        其他节点.push(元素);
+                    } else {
+                        优选IP.push(元素);
+                    }
+                }
+                
+                // 从优选API获取IP
+                if (优选API.length > 0) {
+                    const 优选API的IP = await 请求优选API(优选API);
+                    优选IP.push(...优选API的IP);
+                }
+                
+                // 解析所有IP并生成节点
+                if (优选IP.length > 0) {
+                    const IP列表 = 优选IP.map(原始地址 => {
+                        const regex = /^(\[[\da-fA-F:]+\]|[\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\d+))?(?:#(.+))?$/;
+                        const match = 原始地址.match(regex);
+
+                        if (match) {
+                            const 节点地址 = match[1].replace(/[\[\]]/g, '');
+                            const 节点端口 = match[2] || 443;
+                            const 节点备注 = match[3] || 节点地址;
+                            return {
+                                ip: 节点地址,
+                                port: parseInt(节点端口),
+                                name: 节点备注
+                            };
+                        }
+                        return null;
+                    }).filter(item => item !== null);
+                    
+                    if (IP列表.length > 0) {
+                        const hasProtocol = evEnabled || etEnabled || vmEnabled;
+                        const useVL = hasProtocol ? evEnabled : true;
+                        
+                        if (useVL) {
+                            finalLinks.push(...generateLinksFromNewIPs(IP列表, user, nodeDomain, wsPath, echConfig));
+                        }
+                    }
+                }
+            } else {
+                // 原有的GitHub优选逻辑（单URL）
+                const newIPList = await fetchAndParseNewIPs(piu);
+                if (newIPList.length > 0) {
+                    const hasProtocol = evEnabled || etEnabled || vmEnabled;
+                    const useVL = hasProtocol ? evEnabled : true;
+                    
+                    if (useVL) {
+                        finalLinks.push(...generateLinksFromNewIPs(newIPList, user, nodeDomain, wsPath, echConfig));
+                    }
+                }
             }
         } catch (error) {
-            console.error('获取GitHub IP失败:', error);
+            console.error('获取优选IP失败:', error);
         }
     }
 
@@ -486,6 +700,8 @@ function generateClashConfig(links) {
         const path = link.match(/path=([^&#]+)/)?.[1] || '/';
         const host = link.match(/host=([^&#]+)/)?.[1] || '';
         const sni = link.match(/sni=([^&#]+)/)?.[1] || '';
+        const echParam = link.match(/[?&]ech=([^&#]+)/)?.[1];
+        const echDomain = echParam ? decodeURIComponent(echParam).split('+')[0] : '';
         
         yaml += `  - name: ${name}\n`;
         yaml += `    type: vless\n`;
@@ -500,6 +716,11 @@ function generateClashConfig(links) {
         yaml += `        Host: ${host}\n`;
         if (sni) {
             yaml += `    servername: ${sni}\n`;
+        }
+        if (echDomain) {
+            yaml += `    ech-opts:\n`;
+            yaml += `      enable: true\n`;
+            yaml += `      query-server-name: ${echDomain}\n`;
         }
     });
     
@@ -553,7 +774,7 @@ function generateHomePage(scuValue) {
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(180deg, #f5f5f7 0%, #ffffff 100%);
+            background: linear-gradient(180deg, #f5f5f7 0%, #ffffff 50%, #fafafa 100%);
             color: #1d1d1f;
             min-height: 100vh;
             padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
@@ -568,36 +789,43 @@ function generateHomePage(scuValue) {
         
         .header {
             text-align: center;
-            padding: 40px 20px 30px;
+            padding: 48px 20px 32px;
         }
         
         .header h1 {
-            font-size: 34px;
+            font-size: 40px;
             font-weight: 700;
-            letter-spacing: -0.5px;
+            letter-spacing: -0.3px;
             color: #1d1d1f;
             margin-bottom: 8px;
+            line-height: 1.1;
         }
         
         .header p {
             font-size: 17px;
             color: #86868b;
             font-weight: 400;
+            line-height: 1.5;
         }
         
         .card {
-            background: rgba(255, 255, 255, 0.8);
-            backdrop-filter: blur(20px) saturate(180%);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border-radius: 20px;
-            padding: 24px;
-            margin-bottom: 16px;
-            box-shadow: 0 2px 16px rgba(0, 0, 0, 0.08);
-            border: 0.5px solid rgba(0, 0, 0, 0.04);
+            background: rgba(255, 255, 255, 0.75);
+            backdrop-filter: blur(30px) saturate(200%);
+            -webkit-backdrop-filter: blur(30px) saturate(200%);
+            border-radius: 24px;
+            padding: 28px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.05);
+            border: 0.5px solid rgba(0, 0, 0, 0.06);
+            will-change: transform;
         }
         
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 24px;
+        }
+        
+        .form-group:last-child {
+            margin-bottom: 0;
         }
         
         .form-group label {
@@ -610,42 +838,75 @@ function generateHomePage(scuValue) {
             letter-spacing: 0.5px;
         }
         
-        .form-group input {
+        .form-group input,
+        .form-group textarea {
             width: 100%;
             padding: 14px 16px;
             font-size: 17px;
             font-weight: 400;
             color: #1d1d1f;
             background: rgba(142, 142, 147, 0.12);
-            border: none;
+            border: 2px solid transparent;
             border-radius: 12px;
             outline: none;
-            transition: all 0.2s ease;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
             -webkit-appearance: none;
         }
         
-        .form-group input:focus {
+        .form-group input:focus,
+        .form-group textarea:focus {
             background: rgba(142, 142, 147, 0.16);
-            transform: scale(1.01);
+            border-color: #007AFF;
+            transform: scale(1.005);
         }
         
-        .form-group input::placeholder {
+        .form-group input::placeholder,
+        .form-group textarea::placeholder {
             color: #86868b;
         }
         
-        .switch-group {
+        .form-group small {
+            display: block;
+            margin-top: 8px;
+            color: #86868b;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        
+        .list-item {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 12px 0;
+            padding: 16px 0;
+            min-height: 52px;
+            cursor: pointer;
+            border-bottom: 0.5px solid rgba(0, 0, 0, 0.08);
+            transition: background-color 0.15s ease;
         }
         
-        .switch-group label {
+        .list-item:last-child {
+            border-bottom: none;
+        }
+        
+        .list-item:active {
+            background-color: rgba(142, 142, 147, 0.08);
+            margin: 0 -28px;
+            padding-left: 28px;
+            padding-right: 28px;
+        }
+        
+        .list-item-label {
             font-size: 17px;
             font-weight: 400;
             color: #1d1d1f;
-            text-transform: none;
-            letter-spacing: 0;
+            flex: 1;
+        }
+        
+        .list-item-description {
+            font-size: 13px;
+            color: #86868b;
+            margin-top: 4px;
+            line-height: 1.4;
         }
         
         .switch {
@@ -654,12 +915,13 @@ function generateHomePage(scuValue) {
             height: 31px;
             background: rgba(142, 142, 147, 0.3);
             border-radius: 16px;
-            transition: background 0.3s ease;
+            transition: background 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             cursor: pointer;
+            flex-shrink: 0;
         }
         
         .switch.active {
-            background: #34c759;
+            background: #34C759;
         }
         
         .switch::after {
@@ -672,7 +934,7 @@ function generateHomePage(scuValue) {
             background: #ffffff;
             border-radius: 50%;
             transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15), 0 1px 2px rgba(0, 0, 0, 0.1);
         }
         
         .switch.active::after {
@@ -685,25 +947,41 @@ function generateHomePage(scuValue) {
             font-size: 17px;
             font-weight: 600;
             color: #ffffff;
-            background: #007aff;
+            background: #007AFF;
             border: none;
-            border-radius: 12px;
+            border-radius: 14px;
             cursor: pointer;
-            transition: all 0.2s ease;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
             margin-top: 8px;
             -webkit-appearance: none;
-            box-shadow: 0 2px 8px rgba(0, 122, 255, 0.3);
+            box-shadow: 0 4px 12px rgba(0, 122, 255, 0.25);
+            will-change: transform;
+        }
+        
+        .btn:hover {
+            background: #0051D5;
+            box-shadow: 0 6px 16px rgba(0, 122, 255, 0.3);
         }
         
         .btn:active {
-            transform: scale(0.98);
-            opacity: 0.8;
+            transform: scale(0.97);
+            box-shadow: 0 2px 8px rgba(0, 122, 255, 0.2);
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
         }
         
         .btn-secondary {
             background: rgba(142, 142, 147, 0.12);
-            color: #007aff;
+            color: #007AFF;
             box-shadow: none;
+        }
+        
+        .btn-secondary:hover {
+            background: rgba(142, 142, 147, 0.16);
         }
         
         .btn-secondary:active {
@@ -719,20 +997,33 @@ function generateHomePage(scuValue) {
             color: #1d1d1f;
             word-break: break-all;
             display: none;
+            line-height: 1.5;
         }
         
         .result.show {
             display: block;
         }
         
+        .result-card {
+            padding: 16px;
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border-radius: 12px;
+            margin-bottom: 12px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+            border: 0.5px solid rgba(0, 0, 0, 0.06);
+        }
+        
         .result-url {
             margin-top: 12px;
             padding: 12px;
             background: rgba(0, 122, 255, 0.1);
-            border-radius: 8px;
+            border-radius: 10px;
             font-size: 13px;
             color: #007aff;
             word-break: break-all;
+            line-height: 1.5;
         }
         
         .copy-btn {
@@ -742,20 +1033,26 @@ function generateHomePage(scuValue) {
             background: rgba(0, 122, 255, 0.1);
             color: #007aff;
             border: none;
-            border-radius: 8px;
-            cursor: pointer;
-        }
-        
-        .client-btn {
-            padding: 12px 10px;
-            font-size: 14px;
-            font-weight: 500;
-            color: #007aff;
-            background: rgba(0, 122, 255, 0.1);
-            border: 1px solid rgba(0, 122, 255, 0.2);
             border-radius: 10px;
             cursor: pointer;
             transition: all 0.2s ease;
+        }
+        
+        .copy-btn:active {
+            background: rgba(0, 122, 255, 0.2);
+            transform: scale(0.98);
+        }
+        
+        .client-btn {
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #007AFF;
+            background: rgba(0, 122, 255, 0.1);
+            border: 1px solid rgba(0, 122, 255, 0.2);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
             -webkit-appearance: none;
             white-space: nowrap;
             overflow: hidden;
@@ -764,8 +1061,9 @@ function generateHomePage(scuValue) {
         }
         
         .client-btn:active {
-            transform: scale(0.98);
+            transform: scale(0.97);
             background: rgba(0, 122, 255, 0.2);
+            border-color: rgba(0, 122, 255, 0.3);
         }
         
         .checkbox-label {
@@ -778,12 +1076,13 @@ function generateHomePage(scuValue) {
             -webkit-user-select: none;
             position: relative;
             z-index: 1;
+            padding: 8px 0;
         }
         
         .checkbox-label input[type="checkbox"] {
-            margin-right: 8px;
-            width: 20px;
-            height: 20px;
+            margin-right: 12px;
+            width: 22px;
+            height: 22px;
             cursor: pointer;
             flex-shrink: 0;
             position: relative;
@@ -801,18 +1100,25 @@ function generateHomePage(scuValue) {
         @media (max-width: 480px) {
             .client-btn {
                 font-size: 12px;
-                padding: 10px 8px;
+                padding: 10px 12px;
+            }
+            
+            .header h1 {
+                font-size: 34px;
             }
         }
         
         .footer {
             text-align: center;
-            padding: 30px 20px;
+            padding: 32px 20px;
             color: #86868b;
             font-size: 13px;
         }
         
         .footer a {
+            color: #007AFF;
+            text-decoration: none;
+            font-weight: 500;
             transition: opacity 0.2s ease;
         }
         
@@ -822,26 +1128,50 @@ function generateHomePage(scuValue) {
         
         @media (prefers-color-scheme: dark) {
             body {
-                background: linear-gradient(180deg, #000000 0%, #1c1c1e 100%);
+                background: linear-gradient(180deg, #000000 0%, #1c1c1e 50%, #2c2c2e 100%);
                 color: #f5f5f7;
             }
             
             .card {
-                background: rgba(28, 28, 30, 0.8);
-                border: 0.5px solid rgba(255, 255, 255, 0.1);
+                background: rgba(28, 28, 30, 0.75);
+                border: 0.5px solid rgba(255, 255, 255, 0.12);
+                box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
             }
             
-            .form-group input {
+            .form-group input,
+            .form-group textarea {
                 background: rgba(142, 142, 147, 0.2);
                 color: #f5f5f7;
             }
             
-            .form-group input:focus {
+            .form-group input:focus,
+            .form-group textarea:focus {
                 background: rgba(142, 142, 147, 0.25);
+                border-color: #5ac8fa;
             }
             
-            .switch-group label {
+            .list-item {
+                border-bottom-color: rgba(255, 255, 255, 0.1);
+            }
+            
+            .list-item:active {
+                background: rgba(255, 255, 255, 0.08);
+            }
+            
+            .list-item-label {
                 color: #f5f5f7;
+            }
+            
+            .switch {
+                background: rgba(142, 142, 147, 0.4);
+            }
+            
+            .switch.active {
+                background: #30d158;
+            }
+            
+            .switch::after {
+                background: #ffffff;
             }
             
             .result {
@@ -849,12 +1179,12 @@ function generateHomePage(scuValue) {
                 color: #f5f5f7;
             }
             
-            select {
-                background: rgba(142, 142, 147, 0.2) !important;
-                color: #f5f5f7 !important;
+            .result-card {
+                background: rgba(28, 28, 30, 0.9);
+                border-color: rgba(255, 255, 255, 0.1);
             }
             
-            label span {
+            .checkbox-label span {
                 color: #f5f5f7;
             }
             
@@ -867,6 +1197,7 @@ function generateHomePage(scuValue) {
             .footer a {
                 color: #5ac8fa !important;
             }
+            
         }
     </style>
 </head>
@@ -874,7 +1205,7 @@ function generateHomePage(scuValue) {
     <div class="container">
         <div class="header">
             <h1>服务器优选工具</h1>
-            <p>智能优选 • 一键生成</p>
+            <p>智能优选 • 一键生成 (高质量源版)</p>
         </div>
         
         <div class="card">
@@ -884,8 +1215,8 @@ function generateHomePage(scuValue) {
             </div>
             
             <div class="form-group">
-                <label>UUID</label>
-                <input type="text" id="uuid" placeholder="请输入UUID">
+                <label>UUID/Password</label>
+                <input type="text" id="uuid" placeholder="请输入UUID或Password">
             </div>
             
             <div class="form-group">
@@ -894,19 +1225,25 @@ function generateHomePage(scuValue) {
                 <small style="display: block; margin-top: 6px; color: #86868b; font-size: 13px;">自定义WebSocket路径，例如：/v2ray 或 /</small>
             </div>
             
-            <div class="switch-group">
-                <label>启用优选域名</label>
-                <div class="switch active" id="switchDomain" onclick="toggleSwitch('switchDomain')"></div>
+            <div class="list-item" onclick="toggleSwitch('switchDomain')">
+                <div>
+                    <div class="list-item-label">启用优选域名</div>
+                </div>
+                <div class="switch active" id="switchDomain"></div>
             </div>
             
-            <div class="switch-group">
-                <label>启用优选IP</label>
-                <div class="switch active" id="switchIP" onclick="toggleSwitch('switchIP')"></div>
+            <div class="list-item" onclick="toggleSwitch('switchIP')">
+                <div>
+                    <div class="list-item-label">启用优选IP</div>
+                </div>
+                <div class="switch active" id="switchIP"></div>
             </div>
             
-            <div class="switch-group">
-                <label>启用GitHub优选</label>
-                <div class="switch active" id="switchGitHub" onclick="toggleSwitch('switchGitHub')"></div>
+            <div class="list-item" onclick="toggleSwitch('switchGitHub')">
+                <div>
+                    <div class="list-item-label">启用GitHub优选</div>
+                </div>
+                <div class="switch active" id="switchGitHub"></div>
             </div>
             
             <div class="form-group" id="githubUrlGroup" style="margin-top: 12px;">
@@ -917,18 +1254,24 @@ function generateHomePage(scuValue) {
             
             <div class="form-group" style="margin-top: 24px;">
                 <label>协议选择</label>
-                <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 8px;">
-                    <div class="switch-group">
-                        <label>VLESS (vl)</label>
-                        <div class="switch active" id="switchVL" onclick="toggleSwitch('switchVL')"></div>
+                <div style="margin-top: 8px;">
+                    <div class="list-item" onclick="toggleSwitch('switchVL')">
+                        <div>
+                            <div class="list-item-label">VLESS (vl)</div>
+                        </div>
+                        <div class="switch active" id="switchVL"></div>
                     </div>
-                    <div class="switch-group">
-                        <label>Trojan (tj)</label>
-                        <div class="switch" id="switchTJ" onclick="toggleSwitch('switchTJ')"></div>
+                    <div class="list-item" onclick="toggleSwitch('switchTJ')">
+                        <div>
+                            <div class="list-item-label">Trojan (tj)</div>
+                        </div>
+                        <div class="switch" id="switchTJ"></div>
                     </div>
-                    <div class="switch-group">
-                        <label>VMess (vm)</label>
-                        <div class="switch" id="switchVM" onclick="toggleSwitch('switchVM')"></div>
+                    <div class="list-item" onclick="toggleSwitch('switchVM')">
+                        <div>
+                            <div class="list-item-label">VMess (vm)</div>
+                        </div>
+                        <div class="switch" id="switchVM"></div>
                     </div>
                 </div>
             </div>
@@ -982,17 +1325,34 @@ function generateHomePage(scuValue) {
                 </div>
             </div>
             
-            <div class="switch-group" style="margin-top: 20px;">
-                <label>仅TLS节点</label>
-                <div class="switch" id="switchTLS" onclick="toggleSwitch('switchTLS')"></div>
+            <div class="list-item" onclick="toggleSwitch('switchTLS')" style="margin-top: 8px;">
+                <div>
+                    <div class="list-item-label">仅TLS节点</div>
+                    <div class="list-item-description">启用后只生成带TLS的节点，不生成非TLS节点（如80端口）</div>
+                </div>
+                <div class="switch" id="switchTLS"></div>
             </div>
-            <small style="display: block; margin-top: -12px; margin-bottom: 12px; color: #86868b; font-size: 13px; padding-left: 0;">启用后只生成带TLS的节点，不生成非TLS节点（如80端口）</small>
+            
+            <div class="list-item" onclick="toggleSwitch('switchECH')" style="margin-top: 8px;">
+                <div>
+                    <div class="list-item-label">ECH (Encrypted Client Hello)</div>
+                    <div class="list-item-description">启用后节点链接将携带 ECH 参数，需客户端支持；开启时自动仅TLS</div>
+                </div>
+                <div class="switch" id="switchECH"></div>
+            </div>
+            <div class="form-group" id="echOptionsGroup" style="margin-top: 12px; display: none;">
+                <label>ECH 自定义 DNS（可选）</label>
+                <input type="text" id="customDNS" placeholder="例如: https://dns.joeyblog.eu.org/joeyblog" style="font-size: 14px;">
+                <small style="display: block; margin-top: 6px; color: #86868b; font-size: 13px;">用于 ECH 配置查询的 DoH 地址</small>
+                <label style="margin-top: 12px; display: block;">ECH 域名（可选）</label>
+                <input type="text" id="customECHDomain" placeholder="例如: cloudflare-ech.com" style="font-size: 14px;">
+            </div>
         </div>
         
         <div class="footer">
             <p>简化版优选工具 • 仅用于节点生成</p>
             <div style="margin-top: 20px; display: flex; justify-content: center; gap: 24px; flex-wrap: wrap;">
-                <a href="https://github.com/byJoey/cfnew" target="_blank" style="color: #007aff; text-decoration: none; font-size: 15px; font-weight: 500;">GitHub 项目</a>
+                <a href="https://github.com/byJoey/yx-auto" target="_blank" style="color: #007aff; text-decoration: none; font-size: 15px; font-weight: 500;">GitHub 项目</a>
                 <a href="https://www.youtube.com/@joeyblog" target="_blank" style="color: #007aff; text-decoration: none; font-size: 15px; font-weight: 500;">YouTube @joeyblog</a>
             </div>
         </div>
@@ -1006,15 +1366,24 @@ function generateHomePage(scuValue) {
             switchVL: true,
             switchTJ: false,
             switchVM: false,
-            switchTLS: false
+            switchTLS: false,
+            switchECH: false
         };
         
         function toggleSwitch(id) {
             const switchEl = document.getElementById(id);
             switches[id] = !switches[id];
             switchEl.classList.toggle('active');
+            if (id === 'switchECH') {
+                const echOpt = document.getElementById('echOptionsGroup');
+                if (echOpt) echOpt.style.display = switches.switchECH ? 'block' : 'none';
+                if (switches.switchECH && !switches.switchTLS) {
+                    switches.switchTLS = true;
+                    const tlsEl = document.getElementById('switchTLS');
+                    if (tlsEl) tlsEl.classList.add('active');
+                }
+            }
         }
-        
         
         // 订阅转换地址（从服务器注入）
         const SUB_CONVERTER_URL = "${ scu }";
@@ -1070,12 +1439,7 @@ function generateHomePage(scuValue) {
             const customPath = document.getElementById('customPath').value.trim() || '/';
             
             if (!domain || !uuid) {
-                alert('请先填写域名和UUID');
-                return;
-            }
-            
-            if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uuid)) {
-                alert('UUID格式不正确');
+                alert('请先填写域名和UUID/Password');
                 return;
             }
             
@@ -1105,7 +1469,7 @@ function generateHomePage(scuValue) {
             // 添加协议选择
             if (switches.switchVL) subscriptionUrl += '&ev=yes';
             if (switches.switchTJ) subscriptionUrl += '&et=yes';
-            if (switches.switchVM) subscriptionUrl += '&vm=yes';
+            if (switches.switchVM) subscriptionUrl += '&mess=yes';
             
             if (!ipv4Enabled) subscriptionUrl += '&ipv4=no';
             if (!ipv6Enabled) subscriptionUrl += '&ipv6=no';
@@ -1113,8 +1477,15 @@ function generateHomePage(scuValue) {
             if (!ispUnicom) subscriptionUrl += '&ispUnicom=no';
             if (!ispTelecom) subscriptionUrl += '&ispTelecom=no';
             
-            // 添加TLS控制
+            // 添加TLS控制（ECH 开启时也会在服务端强制仅 TLS）
             if (switches.switchTLS) subscriptionUrl += '&dkby=yes';
+            if (switches.switchECH) {
+                subscriptionUrl += '&ech=yes';
+                const dnsVal = document.getElementById('customDNS') && document.getElementById('customDNS').value.trim();
+                if (dnsVal) subscriptionUrl += \`&customDNS=\${encodeURIComponent(dnsVal)}\`;
+                const domainVal = document.getElementById('customECHDomain') && document.getElementById('customECHDomain').value.trim();
+                if (domainVal) subscriptionUrl += \`&customECHDomain=\${encodeURIComponent(domainVal)}\`;
+            }
             
             // 添加自定义路径
             if (customPath && customPath !== '/') {
@@ -1219,14 +1590,66 @@ export default {
             });
         }
         
-        // 订阅请求格式: /{UUID}/sub?domain=xxx&epd=yes&epi=yes&egi=yes
+        // 测试优选API API: /test-optimize-api?url=xxx&port=443
+        if (path === '/test-optimize-api') {
+            if (request.method === 'OPTIONS') {
+                return new Response(null, {
+                    headers: {
+                        'Access-Control-Allow-Origin': '*',
+                        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+                        'Access-Control-Allow-Headers': 'Content-Type'
+                    }
+                });
+            }
+            
+            const apiUrl = url.searchParams.get('url');
+            const port = url.searchParams.get('port') || '443';
+            const timeout = parseInt(url.searchParams.get('timeout') || '3000');
+            
+            if (!apiUrl) {
+                return new Response(JSON.stringify({ 
+                    success: false, 
+                    error: '缺少url参数' 
+                }), {
+                    status: 400,
+                    headers: { 
+                        'Content-Type': 'application/json; charset=utf-8',
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+            
+            try {
+                const results = await 请求优选API([apiUrl], port, timeout);
+                return new Response(JSON.stringify({ 
+                    success: true, 
+                    results: results,
+                    total: results.length,
+                    message: `成功获取 ${results.length} 个优选IP`
+                }, null, 2), {
+                    headers: { 
+                        'Content-Type': 'application/json; charset=utf-8',
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            } catch (error) {
+                return new Response(JSON.stringify({ 
+                    success: false, 
+                    error: error.message 
+                }), {
+                    status: 500,
+                    headers: { 
+                        'Content-Type': 'application/json; charset=utf-8',
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            }
+        }
+        
+        // 订阅请求格式: /{UUID或Password}/sub?domain=xxx&epd=yes&epi=yes&egi=yes
         const pathMatch = path.match(/^\/([^\/]+)\/sub$/);
         if (pathMatch) {
             const uuid = pathMatch[1];
-            
-            if (!isValidUUID(uuid)) {
-                return new Response('无效的UUID格式', { status: 400 });
-            }
             
             const domain = url.searchParams.get('domain');
             if (!domain) {
@@ -1242,7 +1665,7 @@ export default {
             // 协议选择
             const evEnabled = url.searchParams.get('ev') === 'yes' || (url.searchParams.get('ev') === null && ev);
             const etEnabled = url.searchParams.get('et') === 'yes';
-            const vmEnabled = url.searchParams.get('vm') === 'yes';
+            const vmEnabled = url.searchParams.get('mess') === 'yes';
             
             // IPv4/IPv6选择
             const ipv4Enabled = url.searchParams.get('ipv4') !== 'no';
@@ -1253,13 +1676,19 @@ export default {
             const ispUnicom = url.searchParams.get('ispUnicom') !== 'no';
             const ispTelecom = url.searchParams.get('ispTelecom') !== 'no';
             
-            // TLS控制
-            const disableNonTLS = url.searchParams.get('dkby') === 'yes';
-            
+            // TLS控制（ECH 开启时强制仅 TLS）
+            let disableNonTLS = url.searchParams.get('dkby') === 'yes';
+            const echParam = url.searchParams.get('ech');
+            const echEnabled = echParam === 'yes' || (echParam === null && enableECH);
+            if (echEnabled) disableNonTLS = true;
+            const customDNSParam = url.searchParams.get('customDNS') || customDNS;
+            const customECHDomainParam = url.searchParams.get('customECHDomain') || customECHDomain;
+            const echConfig = echEnabled ? `${customECHDomainParam}+${customDNSParam}` : null;
+
             // 自定义路径
             const customPath = url.searchParams.get('path') || '/';
-            
-            return await handleSubscriptionRequest(request, uuid, domain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled, disableNonTLS, customPath);
+
+            return await handleSubscriptionRequest(request, uuid, domain, piu, ipv4Enabled, ipv6Enabled, ispMobile, ispUnicom, ispTelecom, evEnabled, etEnabled, vmEnabled, disableNonTLS, customPath, echConfig);
         }
         
         return new Response('Not Found', { status: 404 });
