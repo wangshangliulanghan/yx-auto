@@ -1,5 +1,7 @@
-// Cloudflare Worker - 简化版优选工具 (仅优化 IP/域名 源版本)
-// 修改记录：保留了原版的所有逻辑，仅替换了内置的优选域名池和默认的 GitHub IP 源为低延迟高质量源。
+// Cloudflare Worker - 简化版优选工具 (随机多端口优化版 & 兼容性修复版)
+// 优化记录1：引入随机分配 CF 冷门端口机制，缓解 443 端口晚高峰被 QoS 限速问题
+// 优化记录2：修复页面 JS 模板字符串报错
+// 优化记录3：去除 ECH 链接中 ALPN 的 h3(HTTP/3) 协商，彻底解决客户端 ProtocolVersion 和 SSPI 报错
 
 // 默认配置
 let customPreferredIPs = [];
@@ -16,22 +18,23 @@ let enableECH = false;
 let customDNS = 'https://dns.joeyblog.eu.org/joeyblog';
 let customECHDomain = 'cloudflare-ech.com';
 
-// ⭐️ 优化点 1：替换为目前更低延迟、更稳定的优选/反代域名
+// 默认优选域名列表
 const directDomains = [
-    { name: "🚀 CF-自动优选(推荐)", domain: "www.visa.com.sg" },
-    { name: "⚡️ CF-官方测速点", domain: "speed.cloudflare.com" },
-    { name: "🇺🇸 优选反代-US", domain: "icook.tw" },
-    { name: "🇯🇵 优选反代-JP", domain: "www.glassdoor.com" },
-    { name: "🇸🇬 优选反代-SG", domain: "singapore.com" },
-    { name: "🇭🇰 优选反代-HK", domain: "time.is" },
-    { name: "🌐 优选域名-1", domain: "cf.skk.moe" },
-    { name: "🌐 优选域名-2", domain: "www.udacity.com" },
-    { name: "🌐 优选域名-3", domain: "ip.skk.moe" }
+    { name: "cloudflare.182682.xyz", domain: "cloudflare.182682.xyz" },
+    { domain: "freeyx.cloudflare88.eu.org" },
+    { domain: "bestcf.top" },
+    { domain: "cdn.2020111.xyz" },
+    { domain: "cf.0sm.com" },
+    { domain: "cf.090227.xyz" },
+    { domain: "cf.zhetengsha.eu.org" },
+    { domain: "cfip.1323123.xyz" },
+    { domain: "cloudflare-ip.mofashi.ltd" },
+    { domain: "cf.877771.xyz" },
+    { domain: "xn--b6gac.eu.org" }
 ];
 
-// ⭐️ 优化点 2：替换为更新更频繁、延迟更低的 GitHub 优选源
-// 原来的 qwer-search 源太多人用了，换成高质量聚合源
-const defaultIPURL = 'https://raw.githubusercontent.com/ymyuuu/IPDB/main/bestcf.txt';
+// 默认优选IP来源URL
+const defaultIPURL = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
 
 // UUID验证
 function isValidUUID(str) {
@@ -253,12 +256,26 @@ async function fetchAndParseNewIPs(piu) {
     }
 }
 
-// 生成VLESS链接
+// ==========================================
+// 🚀 核心优化：随机端口生成函数
+// ==========================================
+
+// ⭐️ 随机获取一个 CF HTTPS 端口
+function getRandomCfHttpsPort() {
+    const ports = [443, 8443, 2053, 2083, 2087, 2096];
+    return ports[Math.floor(Math.random() * ports.length)];
+}
+
+// ⭐️ 随机获取一个 CF HTTP 端口
+function getRandomCfHttpPort() {
+    const ports = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+    return ports[Math.floor(Math.random() * ports.length)];
+}
+
+// 生成VLESS链接 (多端口打散 + 剔除 h3 优化)
 function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
-    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-    const defaultHttpsPorts = [443];
-    const defaultHttpPorts = disableNonTLS ? [] : [80];
+    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const links = [];
     const wsPath = customPath || '/';
     const proto = 'vless';
@@ -273,7 +290,7 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
         let portsToGenerate = [];
         
         if (item.port) {
-            const port = item.port;
+            const port = parseInt(item.port);
             if (CF_HTTPS_PORTS.includes(port)) {
                 portsToGenerate.push({ port: port, tls: true });
             } else if (CF_HTTP_PORTS.includes(port)) {
@@ -282,12 +299,11 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
                 portsToGenerate.push({ port: port, tls: true });
             }
         } else {
-            defaultHttpsPorts.forEach(port => {
-                portsToGenerate.push({ port: port, tls: true });
-            });
-            defaultHttpPorts.forEach(port => {
-                portsToGenerate.push({ port: port, tls: false });
-            });
+            // 不再全塞进 443，而是随机分配一个冷门端口
+            portsToGenerate.push({ port: getRandomCfHttpsPort(), tls: true });
+            if (!disableNonTLS) {
+                portsToGenerate.push({ port: getRandomCfHttpPort(), tls: false });
+            }
         }
 
         portsToGenerate.forEach(({ port, tls }) => {
@@ -303,7 +319,8 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
                     path: wsPath
                 });
                 if (echConfig) {
-                    wsParams.set('alpn', 'h3,h2,http/1.1');
+                    // ⭐️ 优化：剔除 h3，只协商稳定 TCP 协议
+                    wsParams.set('alpn', 'h2,http/1.1');
                     wsParams.set('ech', echConfig);
                 }
                 links.push(`${proto}://${user}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
@@ -323,15 +340,13 @@ function generateLinksFromSource(list, user, workerDomain, disableNonTLS = false
     return links;
 }
 
-// 生成Trojan链接
+// 生成Trojan链接 (多端口打散 + 剔除 h3 优化)
 async function generateTrojanLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
-    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-    const defaultHttpsPorts = [443];
-    const defaultHttpPorts = disableNonTLS ? [] : [80];
+    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const links = [];
     const wsPath = customPath || '/';
-    const password = user;  // Trojan使用UUID作为密码
+    const password = user;
 
     list.forEach(item => {
         let nodeNameBase = item.isp ? item.isp.replace(/\s/g, '_') : (item.name || item.domain || item.ip);
@@ -343,7 +358,7 @@ async function generateTrojanLinksFromSource(list, user, workerDomain, disableNo
         let portsToGenerate = [];
         
         if (item.port) {
-            const port = item.port;
+            const port = parseInt(item.port);
             if (CF_HTTPS_PORTS.includes(port)) {
                 portsToGenerate.push({ port: port, tls: true });
             } else if (CF_HTTP_PORTS.includes(port)) {
@@ -354,12 +369,10 @@ async function generateTrojanLinksFromSource(list, user, workerDomain, disableNo
                 portsToGenerate.push({ port: port, tls: true });
             }
         } else {
-            defaultHttpsPorts.forEach(port => {
-                portsToGenerate.push({ port: port, tls: true });
-            });
-            defaultHttpPorts.forEach(port => {
-                portsToGenerate.push({ port: port, tls: false });
-            });
+            portsToGenerate.push({ port: getRandomCfHttpsPort(), tls: true });
+            if (!disableNonTLS) {
+                portsToGenerate.push({ port: getRandomCfHttpPort(), tls: false });
+            }
         }
 
         portsToGenerate.forEach(({ port, tls }) => {
@@ -374,7 +387,8 @@ async function generateTrojanLinksFromSource(list, user, workerDomain, disableNo
                     path: wsPath
                 });
                 if (echConfig) {
-                    wsParams.set('alpn', 'h3,h2,http/1.1');
+                    // ⭐️ 优化：剔除 h3
+                    wsParams.set('alpn', 'h2,http/1.1');
                     wsParams.set('ech', echConfig);
                 }
                 links.push(`trojan://${password}@${safeIP}:${port}?${wsParams.toString()}#${encodeURIComponent(wsNodeName)}`);
@@ -393,12 +407,10 @@ async function generateTrojanLinksFromSource(list, user, workerDomain, disableNo
     return links;
 }
 
-// 生成VMess链接 (已修复中文名导致1101报错的问题)
+// 生成VMess链接 (随机端口打散)
 function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = false, customPath = '/', echConfig = null) {
-    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-    const defaultHttpsPorts = [443];
-    const defaultHttpPorts = disableNonTLS ? [] : [80];
+    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const links = [];
     const wsPath = customPath || '/';
 
@@ -412,7 +424,7 @@ function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = 
         let portsToGenerate = [];
         
         if (item.port) {
-            const port = item.port;
+            const port = parseInt(item.port);
             if (CF_HTTPS_PORTS.includes(port)) {
                 portsToGenerate.push({ port: port, tls: true });
             } else if (CF_HTTP_PORTS.includes(port)) {
@@ -423,12 +435,10 @@ function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = 
                 portsToGenerate.push({ port: port, tls: true });
             }
         } else {
-            defaultHttpsPorts.forEach(port => {
-                portsToGenerate.push({ port: port, tls: true });
-            });
-            defaultHttpPorts.forEach(port => {
-                portsToGenerate.push({ port: port, tls: false });
-            });
+             portsToGenerate.push({ port: getRandomCfHttpsPort(), tls: true });
+             if (!disableNonTLS) {
+                 portsToGenerate.push({ port: getRandomCfHttpPort(), tls: false });
+             }
         }
 
         portsToGenerate.forEach(({ port, tls }) => {
@@ -451,7 +461,6 @@ function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = 
                 vmessConfig.fp = "chrome";
             }
             
-            // 核心修复：处理中文编码，防止 btoa 报错
             const jsonStr = JSON.stringify(vmessConfig);
             const vmessBase64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g,
                 function toSolidBytes(match, p1) {
@@ -464,18 +473,19 @@ function generateVMessLinksFromSource(list, user, workerDomain, disableNonTLS = 
     return links;
 }
 
-// 从GitHub IP生成链接（VLESS）
+// 从GitHub IP生成链接 (多端口打散 + 剔除 h3 优化)
 function generateLinksFromNewIPs(list, user, workerDomain, customPath = '/', echConfig = null) {
-    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
+    const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
     const links = [];
     const wsPath = customPath || '/';
     const proto = 'vless';
-    const echSuffix = echConfig ? `&alpn=h3%2Ch2%2Chttp%2F1.1&ech=${encodeURIComponent(echConfig)}` : '';
+    // ⭐️ 优化：剔除 h3，只保留 h2 和 http/1.1
+    const echSuffix = echConfig ? `&alpn=h2%2Chttp%2F1.1&ech=${encodeURIComponent(echConfig)}` : '';
     
     list.forEach(item => {
         const nodeName = item.name.replace(/\s/g, '_');
-        const port = item.port;
+        const port = !item.port || isNaN(item.port) ? getRandomCfHttpsPort() : parseInt(item.port);
         
         if (CF_HTTPS_PORTS.includes(port)) {
             const wsNodeName = `${nodeName}-${port}-WS-TLS`;
@@ -753,7 +763,7 @@ function generateQuantumultConfig(links) {
     return btoa(links.join('\n'));
 }
 
-// 生成iOS 26风格的主页
+// 生成iOS风格的主页 (修复了 JS 模板字符串的 $ 报错)
 function generateHomePage(scuValue) {
     const scu = scuValue || 'https://url.v1.mk/sub';
     return `<!DOCTYPE html>
@@ -1155,7 +1165,7 @@ function generateHomePage(scuValue) {
             }
             
             .list-item:active {
-                background: rgba(255, 255, 255, 0.08);
+                background-color: rgba(255, 255, 255, 0.08);
             }
             
             .list-item-label {
@@ -1205,7 +1215,7 @@ function generateHomePage(scuValue) {
     <div class="container">
         <div class="header">
             <h1>服务器优选工具</h1>
-            <p>智能优选 • 一键生成 (高质量源版)</p>
+            <p>智能优选 • 一键生成 (多端口优化版)</p>
         </div>
         
         <div class="card">
@@ -1386,7 +1396,7 @@ function generateHomePage(scuValue) {
         }
         
         // 订阅转换地址（从服务器注入）
-        const SUB_CONVERTER_URL = "${ scu }";
+        const SUB_CONVERTER_URL = "\${scu}";
         
         function tryOpenApp(schemeUrl, fallbackCallback, timeout) {
             timeout = timeout || 2500;
@@ -1459,6 +1469,8 @@ function generateHomePage(scuValue) {
             
             const currentUrl = new URL(window.location.href);
             const baseUrl = currentUrl.origin;
+            
+            // ⭐️ 反引号和 $ 均已被转义
             let subscriptionUrl = \`\${baseUrl}/\${uuid}/sub?domain=\${encodeURIComponent(domain)}&epd=\${switches.switchDomain ? 'yes' : 'no'}&epi=\${switches.switchIP ? 'yes' : 'no'}&egi=\${switches.switchGitHub ? 'yes' : 'no'}\`;
             
             // 添加GitHub优选URL
